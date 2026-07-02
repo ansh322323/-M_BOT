@@ -1,10 +1,11 @@
 import os
 import base64
+import time
+import sqlite3
 from flask import Flask, request, jsonify, render_template_string, send_from_directory
 from flask_cors import CORS
 from google import genai
 from google.genai import types
-import sqlite3
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, static_folder='static', static_url_path='/static')
@@ -13,6 +14,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 app.secret_key = "m_performance_matrix_secure_771"
 DB_PATH = os.path.join(BASE_DIR, "m_memory_matrix.db")
 
+# Initialize database
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
@@ -29,16 +31,20 @@ def init_db():
 
 init_db()
 
+# Establish Gemini Engine initialization safely using official google-genai SDK
 gemini_client = None
 def verify_and_get_client():
     global gemini_client
     if gemini_client is not None:
         return gemini_client
+    
+    # Retrieves the API key securely from your environment variables
     api_key_check = os.environ.get("GEMINI_API_KEY")
     if not api_key_check:
+        print("[-] Gemini API Key is missing from Environment Variables.")
         return None
     try:
-        gemini_client = genai.Client()
+        gemini_client = genai.Client(api_key=api_key_check)
         return gemini_client
     except Exception as e:
         print(f"[-] Client initialization error: {e}")
@@ -47,40 +53,55 @@ def verify_and_get_client():
 def query_gemini(prompt, system_instruction="", context_history=None):
     client = verify_and_get_client()
     if not client:
-        return "[Gemini Setup Error: Configuration key missing on Cloud server]"
+        return "[Gemini Setup Error: Configuration key missing on Cloud server. Set GEMINI_API_KEY]"
+        
     if context_history is None:
         context_history = []
-    try:
-        config = types.GenerateContentConfig(system_instruction=system_instruction, temperature=0.7)
-        contents = context_history.copy()
-        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=prompt)]))
-        response = client.models.generate_content(model='gemini-2.5-flash', contents=contents, config=config)
-        return response.text.strip() if response.text else "[Gemini Error: Empty response]"
-    except Exception as e:
-        return f"[Gemini Exception: {e}]"
-
-def generate_image_gemini(prompt):
-    client = verify_and_get_client()
-    if not client:
-        return None, "[Gemini Setup Error: Configuration key missing on Cloud server.]"
-    try:
-        response = client.models.generate_images(
-            model="imagen-3.0-generate-002",
-            prompt=prompt,
-            config=types.GenerateImagesConfig(
-                number_of_images=1, 
-                aspect_ratio="1:1",
-                output_mime_type="image/jpeg"
+        
+    max_retries = 3
+    delay = 2
+    
+    # Build context message timeline cleanly matching the new standard formats
+    contents = []
+    for msg in context_history:
+        contents.append(
+            types.Content(
+                role=msg["role"],
+                parts=[types.Part.from_text(text=msg["content"])]
             )
         )
-        if response.images:
-            raw_bytes = response.images[0].image.image_bytes
-            base64_encoded = base64.b64encode(raw_bytes).decode("utf-8")
-            image_data_uri = f"data:image/jpeg;base64,{base64_encoded}"
-            return image_data_uri, "Your requested asset has been generated successfully."
-        return None, "[Image Generation error: API processed request but returned no image bytes]"
-    except Exception as e:
-        return None, f"[Image Generation Exception: {e}]"
+    # Append the newest message input
+    contents.append(
+        types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=prompt)]
+        )
+    )
+    
+    # Configure system instructions structural limits
+    config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        temperature=0.7,
+        max_output_tokens=1024
+    )
+    
+    for attempt in range(max_retries):
+        try:
+            # Utilizing gemini-2.5-flash for lighting-fast performance metrics
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=contents,
+                config=config,
+            )
+            return response.text.strip() if response.text else "[Gemini Error: Empty response structural data]"
+            
+        except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e).toUpperCase():
+                if attempt < max_retries - 1:
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+            return f"[Gemini Resource Quota Exhausted: {e}]"
 
 @app.route("/check_status", methods=["GET"])
 def check_status_endpoint():
@@ -105,7 +126,7 @@ def chat_endpoint():
     reply = ""
 
     if is_image_request:
-        image_uri, reply = generate_image_gemini(prompt)
+        reply = "[Notice: Image Generation features require active Imagen access on this pipeline node. Text queries are fully active.]"
     else:
         context_history = []
         try:
@@ -114,24 +135,20 @@ def chat_endpoint():
                 cursor.execute("SELECT role, content FROM chat_history WHERE session_id = ? ORDER BY id DESC LIMIT 10", (session_id,))
                 rows = cursor.fetchall()
                 for row in reversed(rows):
-                    if not row[1] or any(err in row[1] for err in ["Error", "UNAVAILABLE", "404", "429"]):
+                    if not row[1] or any(err in row[1] for err in ["Error", "UNAVAILABLE", "404", "429", "Exception"]):
                         continue
-                    gemini_role = "user" if row[0] in ["user", "user-bubble"] else "model"
-                    context_history.append(types.Content(role=gemini_role, parts=[types.Part.from_text(text=row[1])]))
+                    # Match standard structural roles
+                    mapped_role = "user" if row[0] in ["user", "user-bubble"] else "model"
+                    context_history.append({"role": mapped_role, "content": row[1]})
         except Exception as db_err:
             print(f"DB Read Error: {db_err}")
 
-        system_instruction = "You are an advanced assistant. Keep replies precise, perfectly engineered, and completely natural."
+        system_instruction = "You are an advanced assistant named M-BOT. Keep replies precise, perfectly engineered, and completely natural."
         if mode == "mm-mode":
             system_instruction += " Focus on high-octane performance metrics and engineering layout rules."
 
-        if provider == "ollama":
-            reply = query_gemini(prompt, system_instruction + " [Cloud Telemetry Fallback: Active]", context_history)
-        elif provider == "both" or mode == "debate":
-            g_resp = query_gemini(prompt, system_instruction, context_history)
-            reply = f"### Gemini Core Resolution\n{g_resp}\n\n---\n*Note: Local Ollama sub-routing is unavailable on 24/7 cloud runtime nodes.*"
-        else: 
-            reply = query_gemini(prompt, system_instruction, context_history)
+        # Route all requests securely into the fixed Gemini query module
+        reply = query_gemini(prompt, system_instruction, context_history)
 
     if not isinstance(reply, str) or not reply.strip():
         reply = "[No response could be generated. Please try again.]"
@@ -199,8 +216,9 @@ VIBE_INTERFACE_LAYOUT = """
         * { box-sizing: border-box; margin: 0; padding: 0; }
         html, body {
             height: 100dvh; width: 100vw; overflow: hidden;
-            background-color: var(--bg-color); color: var(--text-color);
+            color: var(--text-color);
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; user-select: none;
+            transition: background 0.4s ease-in-out;
         }
         body:not(.performance-active) {
             background: radial-gradient(circle at 60% 80%, #1a233a 0%, #0e0f12 60%) !important;
@@ -209,7 +227,9 @@ VIBE_INTERFACE_LAYOUT = """
             background-image: 
                 radial-gradient(circle at center, rgba(0, 0, 0, 0.2) 20%, rgba(0, 0, 0, 0.9) 75%, #000000 100%),
                 url('/static/bmw.jpeg') !important;
-            background-size: 75% auto !important; background-position: center 42% !important; background-repeat: no-repeat;
+            background-size: cover !important; 
+            background-position: center !important; 
+            background-repeat: no-repeat !important;
             background-color: #000000 !important;       
         }
         .app-container { display: flex; width: 100vw; height: 100dvh; position: relative; overflow: hidden; }
@@ -243,7 +263,7 @@ VIBE_INTERFACE_LAYOUT = """
         .custom-app-logo-vector { width: 42px; height: 42px; background-image: url('/favicon.ico'); background-size: contain; background-position: center; background-repeat: no-repeat; display: inline-block; mix-blend-mode: lighten; }
         .welcome-center-logo { width: 110px; height: 110px; margin: 0 auto 16px auto; background-image: url('/favicon.ico'); background-size: contain; background-position: center; background-repeat: no-repeat; mix-blend-mode: lighten; }
         .brand-slashes-wrap span { margin-right: -4px; }
-        .sl-cyan { color: #00A6FF; } .sl-blue { color: #0033FF; } .sl-red  { color: #FF2E2E; }
+        .sl-cyan { color: #00A6FF; } .sl-blue { color: #0033FF; } .sl-red   { color: #FF2E2E; }
         .menu-label { font-size: 11px; color: #808185; text-transform: uppercase; font-weight: 700; letter-spacing: 1px; margin: 25px 8px 8px 8px; }
         .menu-links { display: flex; flex-direction: column; gap: 4px; }
         .nav-item { display: flex; align-items: center; gap: 14px; padding: 12px 14px; color: #e3e3e3; font-size: 14px; font-weight: 500; border-radius: 8px; cursor: pointer; transition: background 0.3s; }
@@ -325,6 +345,21 @@ VIBE_INTERFACE_LAYOUT = """
             content: "▼"; font-size: 9px; color: #b0b3b8; position: absolute; right: 10px; top: 50%;
             transform: translateY(-50%); pointer-events: none;
         }
+        
+        .mic-btn {
+            background: transparent; border: none; color: #808185; font-size: 20px; cursor: pointer;
+            padding: 4px 8px; display: flex; align-items: center; justify-content: center;
+            transition: all 0.2s; border-radius: 50%;
+        }
+        .mic-btn:hover { color: var(--accent-red); background: rgba(255,255,255,0.05); }
+        .mic-btn.recording-active { color: #fff; background: var(--accent-red); animation: micPulse 1.5s infinite; }
+        
+        @keyframes micPulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+            100% { transform: scale(1); }
+        }
+        
         .send-btn { background-color: #303134; color: #808185; border: none; width: 40px; height: 40px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
         .send-btn.active-input { background-color: var(--accent-blue); color: white; }
         .send-btn:disabled { cursor: not-allowed !important; opacity: 0.4; }
@@ -440,11 +475,10 @@ VIBE_INTERFACE_LAYOUT = """
                 <div class="input-box-wrapper" id="inputBoxWrapperElement">
                     <div class="inline-model-selector-wrapper" id="modelSelectionContainer">
                         <select id="providerSelectMenu" title="Target Engine Core">
-                            <option value="gemini" selected>Gemini</option>
-                            <option value="ollama">Ollama (Qwen)</option>
-                            <option value="both">Both</option>
+                            <option value="gemini" selected>Gemini Core</option>
                         </select>
                     </div>
+                    <button class="mic-btn" id="voiceMicTrigger" onclick="toggleVoiceSpeechInput()" title="Voice Input">🎤</button>
                     <input type="text" id="userInput" placeholder="Ask Core..." onkeypress="handleKey(event)" oninput="toggleSendBtnState()" autocomplete="off">
                     <button class="send-btn" id="sendBtn" onclick="transmitPrompt()">
                         <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M5 12H19M19 12L13 6M19 12L13 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -470,8 +504,13 @@ VIBE_INTERFACE_LAYOUT = """
         let activeModalCancelCallback = null;
         let currentAbortController = null;
         let isProcessingRequest = false;
+        let speechRecognitionEngine = null;
+        let isVoiceRecordingActive = false;
 
-        window.addEventListener("DOMContentLoaded", syncSystemHardwareIndicators);
+        window.addEventListener("DOMContentLoaded", () => {
+            syncSystemHardwareIndicators();
+            initializeSpeechRecognitionPipeline();
+        });
 
         function toggleMobileSidebarSystem(openState) {
             const sidebar = document.getElementById("appSidebarNode");
@@ -496,6 +535,57 @@ VIBE_INTERFACE_LAYOUT = """
             } catch (err) {
                 console.error("Telemetry link sync drop:", err);
             }
+        }
+
+        // FIX: Completely fixed JavaScript requestModeChangeSequence layout to prevent syntax errors
+        function requestModeChangeSequence(targetMode, modeLabel) {
+            document.getElementById("executionMode").value = targetMode;
+            
+            // Step 1: Remove all current highlight states
+            document.getElementById("btn-mode-default").classList.remove("engine-active");
+            document.getElementById("btn-mode-mm").classList.remove("engine-active");
+            document.getElementById("btn-mode-debate").classList.remove("engine-active");
+            
+            // Step 2: Dynamically add the engine highlight tracking class
+            if (targetMode === 'default') {
+                document.getElementById("btn-mode-default").classList.add("engine-active");
+                document.body.classList.remove("performance-active");
+            } else if (targetMode === 'mm-mode') {
+                document.getElementById("btn-mode-mm").classList.add("engine-active");
+                document.body.classList.add("performance-active");
+            } else if (targetMode === 'debate') {
+                document.getElementById("btn-mode-debate").classList.add("engine-active");
+                document.body.classList.remove("performance-active");
+            }
+            
+            console.log("System workspace swapped to: " + modeLabel);
+            toggleMobileSidebarSystem(false);
+        }
+
+        function changeEngineTargetDirectly(mode) {
+            alert("Universal Screen Control active. Waiting on hardware context variables.");
+        }
+
+        function triggerImmediateWorkspaceWipe() {
+            document.getElementById("chatDisplay").innerHTML = `
+                <div class="welcome-vibe" id="welcomeDeck">
+                    <div class="welcome-center-logo"></div>
+                    <h1 id="welcomeTextNode">State your objective, Ansh.</h1>
+                </div>
+            `;
+        }
+
+        function triggerPurgeLogsModal() {
+            showCustomAppModal({
+                title: "Purge Database Core?",
+                message: "This will wipe the long-term SQLite memory context loops.",
+                confirmText: "Purge Matrix",
+                cancelText: "Retain Link",
+                onConfirm: async () => {
+                    await fetch("/clear_memory", { method: "POST" });
+                    triggerImmediateWorkspaceWipe();
+                }
+            });
         }
 
         function showCustomAppModal({ title, message, confirmText, cancelText, onConfirm, onCancel }) {
@@ -526,231 +616,118 @@ VIBE_INTERFACE_LAYOUT = """
             document.getElementById("customModalContainer").classList.remove("modal-open");
         }
 
-        function applyTargetEngineState(mode) {
-            document.getElementById("executionMode").value = mode;
-            document.querySelectorAll(".sidebar .nav-item").forEach(el => el.classList.remove("engine-active", "debate-active"));
-            if (mode === "default") document.getElementById("btn-mode-default").classList.add("engine-active");
-            if (mode === "mm-mode") document.getElementById("btn-mode-mm").classList.add("engine-active");
-            if (mode === "debate") document.getElementById("btn-mode-debate").classList.add("debate-active");
-        }
-
-        function resetUIVisualState(msg) {
-            const display = document.getElementById("chatDisplay");
-            display.querySelectorAll(".bubble").forEach(el => el.remove());
-            const info = document.createElement("div");
-            info.className = "bubble bot-bubble";
-            info.textContent = msg;
-            display.appendChild(info);
-        }
-
-        function requestModeChangeSequence(targetMode, targetModeLabel) {
-            if(isProcessingRequest) return;
-            toggleMobileSidebarSystem(false);
-            showCustomAppModal({
-                title: `Switching to ${targetModeLabel}`,
-                message: `Switch to new chat or persist conversation history?`,
-                confirmText: "Start Fresh",
-                cancelText: "Keep History",
-                onConfirm: async () => {
-                    await fetch("/clear_memory", { method: "POST" });
-                    applyTargetEngineState(targetMode);
-                    resetUIVisualState("Matrix reset successful.");
-                },
-                onCancel: async () => {
-                    applyTargetEngineState(targetMode);
-                    resetUIVisualState("Mode switched - conversation persisted.");
-                }
-            });
-        }
-
-        function triggerImmediateWorkspaceWipe() {
-            if(isProcessingRequest) return;
-            toggleMobileSidebarSystem(false);
-            showCustomAppModal({
-                title: "Clear Chat Matrix",
-                message: "Are you sure you want to clear all history?",
-                confirmText: "Clear All",
-                cancelText: "Cancel",
-                onConfirm: async () => {
-                    await fetch("/clear_memory", { method: "POST" });
-                    resetUIVisualState("Workspace cleared.");
-                }
-            });
-        }
-
-        function triggerPurgeLogsModal() {
-            triggerImmediateWorkspaceWipe();
-        }
-
-        function changeEngineTargetDirectly(mode) {
-            if(mode === 'screen-control') {
-                alert("Universal Screen Control active.");
-            }
-        }
-
         function handleKey(e) {
             if (e.key === "Enter") transmitPrompt();
         }
 
         function toggleSendBtnState() {
-            const input = document.getElementById("userInput");
+            const input = document.getElementById("userInput").value.trim();
             const btn = document.getElementById("sendBtn");
-            if (input.value.trim().length > 0 && !isProcessingRequest) {
+            if (input.length > 0) {
                 btn.classList.add("active-input");
             } else {
                 btn.classList.remove("active-input");
             }
         }
 
-        function setLockdownState(locked) {
-            isProcessingRequest = locked;
-            const inputField = document.getElementById("userInput");
-            const sendBtn = document.getElementById("sendBtn");
-            const providerMenu = document.getElementById("providerSelectMenu");
-            const newChatBtn = document.getElementById("btn-new-chat");
+        function initializeSpeechRecognitionPipeline() {
+            const SpeechEngine = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SpeechEngine) return;
+            speechRecognitionEngine = new SpeechEngine();
+            speechRecognitionEngine.continuous = false;
+            speechRecognitionEngine.interimResults = false;
+            speechRecognitionEngine.lang = "en-US";
 
-            inputField.disabled = locked;
-            sendBtn.disabled = locked;
-            providerMenu.disabled = locked;
-            
-            if(locked) {
-                sendBtn.classList.remove("active-input");
-                document.getElementById("inputBoxWrapperElement").style.opacity = "0.6";
-                if(newChatBtn) newChatBtn.style.opacity = "0.4";
-            } else {
-                document.getElementById("inputBoxWrapperElement").style.opacity = "1";
-                if(newChatBtn) newChatBtn.style.opacity = "1";
+            speechRecognitionEngine.onstart = () => {
+                isVoiceRecordingActive = true;
+                document.getElementById("voiceMicTrigger").classList.add("recording-active");
+            };
+
+            speechRecognitionEngine.onend = () => {
+                isVoiceRecordingActive = false;
+                document.getElementById("voiceMicTrigger").classList.remove("recording-active");
+            };
+
+            speechRecognitionEngine.onresult = (event) => {
+                const textResult = event.results[0][0].transcript;
+                document.getElementById("userInput").value = textResult;
                 toggleSendBtnState();
-            }
+                transmitPrompt();
+            };
         }
 
-        function stopCurrentExecution() {
-            if (currentAbortController) {
-                currentAbortController.abort();
-                currentAbortController = null;
+        function toggleVoiceSpeechInput() {
+            if (!speechRecognitionEngine) return;
+            if (isVoiceRecordingActive) {
+                speechRecognitionEngine.stop();
+            } else {
+                speechRecognitionEngine.start();
             }
         }
 
         async function transmitPrompt() {
-            if (isProcessingRequest) return;
+            const inputNode = document.getElementById("userInput");
+            const prompt = inputNode.value.trim();
+            if (!prompt || isProcessingRequest) return;
 
-            const inputField = document.getElementById("userInput");
-            const promptText = inputField.value.trim();
-            if (!promptText) return;
-
-            setLockdownState(true);
+            isProcessingRequest = true;
+            inputNode.value = "";
+            toggleSendBtnState();
 
             const chatDisplay = document.getElementById("chatDisplay");
             const welcomeDeck = document.getElementById("welcomeDeck");
             if (welcomeDeck) welcomeDeck.style.display = "none";
 
-            const userBubble = document.createElement("div");
-            userBubble.className = "bubble user-bubble";
-            userBubble.textContent = promptText;
-            chatDisplay.appendChild(userBubble);
+            // Append User Chat Bubble
+            const userMsgDiv = document.createElement("div");
+            userMsgDiv.className = "bubble user-bubble";
+            userMsgDiv.textContent = prompt;
+            chatDisplay.appendChild(userMsgDiv);
 
-            inputField.value = "";
-
-            const loaderBubble = document.createElement("div");
-            loaderBubble.className = "bubble loader-bubble";
-            loaderBubble.id = "activeLoaderBubble";
-            
-            const dotsFlex = document.createElement("div");
-            dotsFlex.className = "loader-dots-flex";
-            dotsFlex.innerHTML = '<div class="loader-dot"></div><div class="loader-dot" style="animation-delay:0.2s"></div><div class="loader-dot" style="animation-delay:0.4s"></div>';
-            
-            const stopBtn = document.createElement("button");
-            stopBtn.className = "stop-generation-action-btn";
-            stopBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg> Stop';
-            
-            stopBtn.onclick = function() {
-                stopCurrentExecution();
-            };
-
-            loaderBubble.appendChild(dotsFlex);
-            loaderBubble.appendChild(stopBtn);
-            chatDisplay.appendChild(loaderBubble);
-
-            const scrollWrapper = document.getElementById("mainWorkspaceScrollNode");
-            if (scrollWrapper) scrollWrapper.scrollTop = scrollWrapper.scrollHeight;
-
-            const activeMode = document.getElementById("executionMode").value;
-            const chosenProvider = document.getElementById("providerSelectMenu").value;
-
-            currentAbortController = new AbortController();
+            // Append Loading Dot Stream Animation
+            const loaderDiv = document.createElement("div");
+            loaderDiv.className = "loader-bubble";
+            loaderDiv.id = "activeLoaderStream";
+            loaderDiv.innerHTML = `
+                <div class="loader-dots-flex">
+                    <div class="loader-dot" style="animation-delay: 0s"></div>
+                    <div class="loader-dot" style="animation-delay: 0.2s"></div>
+                    <div class="loader-dot" style="animation-delay: 0.4s"></div>
+                </div>
+            `;
+            chatDisplay.appendChild(loaderDiv);
+            document.getElementById("mainWorkspaceScrollNode").scrollTop = document.getElementById("mainWorkspaceScrollNode").scrollHeight;
 
             try {
+                const activeMode = document.getElementById("executionMode").value;
                 const response = await fetch("/chat", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
-                        prompt: promptText,
+                        prompt: prompt,
                         mode: activeMode,
-                        provider: chosenProvider
-                    }),
-                    signal: currentAbortController.signal
+                        provider: "gemini"
+                    })
                 });
-                
                 const data = await response.json();
-                loaderBubble.remove();
-
-                const botBubble = document.createElement("div");
-                botBubble.className = "bubble bot-bubble";
                 
-                const textContainer = document.createElement("div");
-                textContainer.innerHTML = marked.parse(data.response || "Transmission drop detected.");
-                botBubble.appendChild(textContainer);
+                // Erase loader component
+                const loader = document.getElementById("activeLoaderStream");
+                if (loader) loader.remove();
 
-                const lowerPrompt = promptText.toLowerCase();
-                const imageKeywords = ["generate image", "generate img", "create image", "create img", "make image", "make img", "draw an image", "draw a picture", "genrate img", "genrate image", "genrerate"];
-                const forcedImageCheck = imageKeywords.some(kw => lowerPrompt.includes(kw));
-
-                if (data.image_uri) {
-                    const imgNode = document.createElement("img");
-                    imgNode.src = data.image_uri;
-                    imgNode.style.maxWidth = "100%";
-                    imgNode.style.maxHeight = "420px";
-                    imgNode.style.borderRadius = "12px";
-                    imgNode.style.display = "block";
-                    imgNode.style.marginTop = "12px";
-                    imgNode.style.border = "1px solid rgba(255,255,255,0.1)";
-                    imgNode.style.boxShadow = "0 8px 24px rgba(0,0,0,0.5)";
-                    botBubble.appendChild(imgNode);
-                } else if (forcedImageCheck) {
-                    const errorBoxFallback = document.createElement("div");
-                    errorBoxFallback.style.marginTop = "12px";
-                    errorBoxFallback.style.padding = "20px";
-                    errorBoxFallback.style.borderRadius = "12px";
-                    errorBoxFallback.style.border = "2px dashed rgba(255, 46, 46, 0.4)";
-                    errorBoxFallback.style.backgroundColor = "rgba(255, 46, 46, 0.05)";
-                    errorBoxFallback.style.color = "#ff6b6b";
-                    errorBoxFallback.style.fontSize = "14px";
-                    errorBoxFallback.style.fontWeight = "600";
-                    errorBoxFallback.textContent = "Image Component Box Error: Backend configuration returned no byte-array. Verify that GEMINI_API_KEY is configured with permission for model 'imagen-3.0-generate-002'.";
-                    botBubble.appendChild(errorBoxFallback);
-                }
-
-                chatDisplay.appendChild(botBubble);
-                Prism.highlightAllUnder(botBubble);
-                if (scrollWrapper) scrollWrapper.scrollTop = scrollWrapper.scrollHeight;
-
+                // Append Core Bot Response Bubble
+                const botMsgDiv = document.createElement("div");
+                botMsgDiv.className = "bubble bot-bubble";
+                botMsgDiv.innerHTML = marked.parse(data.response || "[Engine System Parameter Empty]");
+                chatDisplay.appendChild(botMsgDiv);
+                
             } catch (err) {
-                loaderBubble.remove();
-                const errorBubble = document.createElement("div");
-                errorBubble.className = "bubble bot-bubble";
-                
-                if (err.name === 'AbortError') {
-                    errorBubble.style.color = "#ff6b6b";
-                    errorBubble.textContent = "Generation execution stopped by client signal loop.";
-                } else {
-                    errorBubble.textContent = `Connection error: ${err.message || err}`;
-                }
-                
-                chatDisplay.appendChild(errorBubble);
-                if (scrollWrapper) scrollWrapper.scrollTop = scrollWrapper.scrollHeight;
+                console.error(err);
+                const loader = document.getElementById("activeLoaderStream");
+                if (loader) loader.remove();
             } finally {
-                currentAbortController = null;
-                setLockdownState(false);
+                isProcessingRequest = false;
+                document.getElementById("mainWorkspaceScrollNode").scrollTop = document.getElementById("mainWorkspaceScrollNode").scrollHeight;
             }
         }
     </script>
@@ -758,5 +735,6 @@ VIBE_INTERFACE_LAYOUT = """
 </html>
 """
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
