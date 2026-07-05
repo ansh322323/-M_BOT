@@ -658,15 +658,14 @@ VIBE_INTERFACE_LAYOUT = """
 </body>
 </html>
 """
-
 if __name__ == "__main__":
     # Check if running in the cloud (Render)
     if os.environ.get("RENDER") or os.environ.get("PORT"):
         port = int(os.environ.get("PORT", 5000))
         app.run(host="0.0.0.0", port=port)
     else:
-        # Only import and run desktop webview locally
-        try:
+        # Dynamic function to prevent Render from parsing the import on startup
+        def run_desktop_interface():
             import webview
             
             def start_flask():
@@ -684,6 +683,10 @@ if __name__ == "__main__":
                 resizable=True
             )
             webview.start()
-        except ImportError:
-            # Fallback if running locally without pywebview installed
+
+        try:
+            run_desktop_interface()
+        except Exception:
+            # Local fallback if pywebview isn't installed on your machine
             app.run(host="127.0.0.1", port=5000, debug=True)
+
