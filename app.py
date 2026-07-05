@@ -205,7 +205,6 @@ VIBE_INTERFACE_LAYOUT = """
         .app-container { display: flex; width: 100vw; height: 100dvh; position: relative; overflow: hidden; }
         .main-content { flex: 1; display: flex; flex-direction: column; height: 100%; overflow: hidden; position: relative; }
         
-        /* Default Stack Matrix: Shifting Blue Light Gradients strictly inside the Workspace area */
         body:not(.performance-active) .main-content {
             background: linear-gradient(135deg, #0e0f12, #141923, #1a233a, #0e0f12) !important;
             background-size: 400% 400% !important;
@@ -218,7 +217,6 @@ VIBE_INTERFACE_LAYOUT = """
             100% { background-position: 0% 50%; }
         }
         
-        /* Performance View: Fit image strictly between Sidebar Boundary & Left/Right Screen limits */
         body.performance-active .main-content {
             background-color: #050608 !important;       
             background-image: 
@@ -658,15 +656,14 @@ VIBE_INTERFACE_LAYOUT = """
 </body>
 </html>
 """
+
 if __name__ == "__main__":
-    # Check if running in the cloud (Render)
     if os.environ.get("RENDER") or os.environ.get("PORT"):
         port = int(os.environ.get("PORT", 5000))
         app.run(host="0.0.0.0", port=port)
     else:
-        # Dynamic function to prevent Render from parsing the import on startup
         def run_desktop_interface():
-            import webview
+            webview_module = __import__('webview')
             
             def start_flask():
                 app.run(host="127.0.0.1", port=5000, debug=False)
@@ -675,18 +672,16 @@ if __name__ == "__main__":
             flask_thread.daemon = True
             flask_thread.start()
 
-            webview.create_window(
+            webview_module.create_window(
                 title="///M-BOT Desktop (Groq Core Engine)", 
                 url="http://127.0.0.1:5000", 
                 width=1250, 
                 height=850,
                 resizable=True
             )
-            webview.start()
+            webview_module.start()
 
         try:
             run_desktop_interface()
         except Exception:
-            # Local fallback if pywebview isn't installed on your machine
             app.run(host="127.0.0.1", port=5000, debug=True)
-
