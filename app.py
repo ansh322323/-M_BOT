@@ -660,25 +660,30 @@ VIBE_INTERFACE_LAYOUT = """
 """
 
 if __name__ == "__main__":
-    IS_RENDER_DEPLOYMENT = os.environ.get("RENDER") or os.environ.get("PORT")
-    
-    if IS_RENDER_DEPLOYMENT:
+    # Check if running in the cloud (Render)
+    if os.environ.get("RENDER") or os.environ.get("PORT"):
         port = int(os.environ.get("PORT", 5000))
         app.run(host="0.0.0.0", port=port)
     else:
-        import webview
-        def start_flask():
-            app.run(host="127.0.0.1", port=5000, debug=False)
+        # Only import and run desktop webview locally
+        try:
+            import webview
+            
+            def start_flask():
+                app.run(host="127.0.0.1", port=5000, debug=False)
 
-        flask_thread = threading.Thread(target=start_flask)
-        flask_thread.daemon = True
-        flask_thread.start()
+            flask_thread = threading.Thread(target=start_flask)
+            flask_thread.daemon = True
+            flask_thread.start()
 
-        webview.create_window(
-            title="///M-BOT Desktop (Groq Core Engine)", 
-            url="http://127.0.0.1:5000", 
-            width=1250, 
-            height=850,
-            resizable=True
-        )
-        webview.start()
+            webview.create_window(
+                title="///M-BOT Desktop (Groq Core Engine)", 
+                url="http://127.0.0.1:5000", 
+                width=1250, 
+                height=850,
+                resizable=True
+            )
+            webview.start()
+        except ImportError:
+            # Fallback if running locally without pywebview installed
+            app.run(host="127.0.0.1", port=5000, debug=True)
